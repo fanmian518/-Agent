@@ -1,0 +1,8 @@
+.env
+.git
+**/__pycache__
+**/node_modules
+**/.stack-backup*
+output
+tmp
+data

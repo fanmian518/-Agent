@@ -1,0 +1,789 @@
+================================================================================
+                  优选商城 · 前端工程（frontend/）完整代码理解手册
+================================================================================
+生成时间：2026-09-04
+工程技术栈：Vue 3 <script setup> + TypeScript + Vite + Vue Router
+样式方案：传统 CSS（.scoped style），不使用 Tailwind。
+状态方案：手工写的模块化 Store（全部基于 Vue reactive/computed，集中在 src/stores/），
+        不引入 Pinia；每个业务一个 ts 文件，统一 localStorage 持久化。
+接口方案：后端接口层已预埋在 src/api/（config.ts 总开关 USE_BACKEND=false），
+        当前不连后端、不发任何网络请求；启用方法与 store→api 迁移对照见 Part B.9。
+构建工具：Vite（vite.config.ts），TS 严格检查（vue-tsc + tsconfig.json strict）。
+
+本手册分 3 部分：
+  Part A — 目录结构（逐层介绍每个文件/文件夹存在的目的）
+  Part B — 模块详细解读（按文件夹逐一说明每个文件的接口、函数、被谁调用、由谁依赖）
+  Part C — 模块跳转图（路由/跳转方式）、决策函数（某业务是由哪个函数/状态决定的）
+
+
+================================================================================
+Part A — 目录结构
+================================================================================
+
+frontend/
+├── index.html                   Vite 入口 HTML：<div id="app"> + <script type="module" src="/src/main.ts">
+├── package.json                 依赖/脚本（dev / build / preview）；构建脚本 vue-tsc && vite build
+│                                  devDependencies 含 @types/node（为 vite.config.ts 提供 Node API 类型）
+├── package-lock.json            依赖锁（npm）
+├── vite.config.ts               Vite 配置：端口、alias @->src、server 代理
+│                                  （proxy 已注释预留：联调时解开，把 /api 转发到后端解决跨域）
+├── tsconfig.json                TS 严格模式；paths @/* 别名；vue 类型扩展
+├── tsconfig.node.json           vite.config.ts 本身的 node-ts 编译配置；
+│                                  compilerOptions.types: ["node"] 显式加载 @types/node，
+│                                  否则 IDE 在 import 'node:url' 处画红线（TS 找不到 Node 内置模块类型）
+├── tailwind.config.js           Tailwind 配置（保留但未使用：按用户偏好已转成传统 CSS）
+├── postcss.config.js            PostCSS 配置（保留未使用）
+│
+├── PROJECT_STRUCTURE_AND_CODE_UNDERSTANDING.txt   ← 你正在读的这份文档
+│
+└── src/
+    ├── main.ts                  应用入口：createApp(App).use(router).mount('#app')
+    ├── env.d.ts                 TS 环境类型声明（.vue 文件模块声明）
+    ├── style.css                全局样式：reset + body 字体/背景；所有页面共用
+    ├── App.vue                  应用根组件：HeaderNav + RouterView(过渡) + Footer
+    │
+    ├── router/
+    │   └── index.ts             Vue Router 配置：路由表 + 全局守卫 + scrollBehavior
+    │
+    ├── api/                     ★ 后端接口层（代码已写好，默认不启用，详见 B.9）
+    │   ├── config.ts            接口层唯一开关：USE_BACKEND=false（纯前端模式）；
+    │   │                        后端地址 API_BASE_URL / 前缀 / 超时 / token 键 都在这改
+    │   ├── request.ts           fetch 请求封装：URL 拼接 + token 注入 + 10s 超时 +
+    │   │                        统一响应 {code,message,data} 解包 + 401/网络错误统一抛 ApiError
+    │   ├── user.ts              注册 / 登录(自动存token) / 登出 / 个人信息 接口
+    │   ├── product.ts           商品列表(分类/搜索/分页) / 商品详情 接口
+    │   ├── cart.ts              购物车 查/加/改数量/选中/全选/批量删/清空 接口
+    │   ├── order.ts             订单 创建/列表/详情/支付/取消/退款/备注 接口
+    │   ├── favorite.ts          收藏 查/加/取消 接口
+    │   ├── address.ts           地址 查/增/改/删/设默认 接口
+    │   └── coupon.ts            优惠券 列表(分组)/领取/核销 接口
+    │
+    ├── components/              可复用组件（目前 1 个全局导航）
+    │   └── HeaderNav.vue        顶部吸顶导航栏（Logo / 搜索 / 收藏❤️ / 🛒 / 用户头像）
+    │
+    ├── stores/                  状态管理层（业务 store，localStorage 持久化）
+    │   ├── user.ts              用户注册/登录/登出；isLoggedIn、currentUsername
+    │   ├── cart.ts              购物车：加购/删/改数量/全选/批量/清空/选中合计
+    │   ├── favorites.ts         收藏夹：toggle/加/删/是否已收藏
+    │   ├── history.ts           浏览历史：recordView/clearHistory/最多 50 条
+    │   ├── shops.ts             店铺：follow/unfollow/toggle/followedShops 计算属性
+    │   ├── reviews.ts           评价：add/update/delete + hasReviewed 判断
+    │   ├── coupons.ts           优惠券：3 分类 computed（可用/已用/过期）+ 领取/使用/删除/初始化
+    │   ├── addresses.ts         收货地址（按用户名隔离）：增/删/改/设默认 + defaultAddress computed
+    │   ├── orders.ts            订单：createOrder → 状态机 updateOrderStatus/cancel/退款/复制单号
+    │   └── products.ts          商品唯一数据源（canonical registry）：getProductById/getCategoryName/...
+    │
+    └── views/                   页面级组件（每个组件对应一个路由）
+        ├── HomeView.vue                      首页：欢迎横幅 + 轮播分类跳转 + 热销商品网格
+        ├── AllProductsView.vue               「查看全部」页面：搜索/分类Tab/排序/商品网格
+        ├── CartView.vue                      购物车页：批量勾选/改数量/结算/推荐
+        ├── CheckoutView.vue                  收银台：地址选择弹窗/支付方式/15分钟倒计时
+        ├── FavoritesView.vue                 收藏夹独立页：批量取消/跳详情/加购/跳购物车
+        ├── LoginView.vue                     登录：表单校验/登录成功后 redirect 还原
+        ├── RegisterView.vue                  注册：重名校验/密码校验/成功后跳登录
+        ├── ProfileView.vue                   用户中心（8 个 Tab：购物车/优惠券/收藏夹/地址管
+        │                                       理/关注店铺/浏览历史/我的订单/评价管理）
+        ├── category/
+        │   └── CategoryView.vue              四个分类页共用（数码/穿搭/家居/新人），props 接收 :category
+        └── product/
+            └── ProductDetailView.vue         商品详情：主图+规格+购买数量+店铺条+评价+图文+看了又看
+
+
+================================================================================
+Part B — 模块详细解读
+================================================================================
+
+------------------------------------------------------------------
+B.1 src/main.ts
+------------------------------------------------------------------
+功能：Vue 应用启动入口
+关键调用：
+  - createApp(App) 构建根实例
+  - .use(router) 注册 Vue Router 插件（让 useRouter/useRoute 能在任何 SFC 使用）
+  - .mount('#app') 挂载到 index.html 上的 div#app
+
+------------------------------------------------------------------
+B.2 src/env.d.ts
+------------------------------------------------------------------
+功能：TypeScript 认识 .vue 文件模块的声明。Vite + Vue 的标准文件，否则 import Xxx from './Xxx.vue' 会报类型错误。
+
+------------------------------------------------------------------
+B.3 src/style.css
+------------------------------------------------------------------
+功能：全局 CSS。只做三件事：
+  1) reset：margin/padding 为 0，box-sizing: border-box
+  2) 全局字体：system-ui/Helvetica/苹方，保证跨平台无衬线
+  3) html/body 背景色 #f9fafb、min-height 100%
+
+------------------------------------------------------------------
+B.4 src/App.vue
+------------------------------------------------------------------
+作用：整站布局壳子（三个子块纵向排列 + Footer 自然贴底）
+  1) <HeaderNav />   — 顶部吸顶导航
+  2) <RouterView>    — 当前路由渲染的位置；用 <transition name="fade"> 淡入淡出
+                      （无 mode="out-in" 避免闪白；.fade-leave-active position:absolute 让旧组件和新组件重叠过渡）
+  3) <footer>        — © 2026 优选商城
+
+状态影响：这里是整站唯一不会被卸载的组件，所有其它视图都通过 RouterView 在它内部切换。
+
+------------------------------------------------------------------
+B.5 src/router/index.ts  —— 「模块跳转方式」的核心
+------------------------------------------------------------------
+职责：集中定义 SPA 所有路由、路由级别的权限控制、页面切换时的滚动控制
+
+【路由表】
+  path                 name         component                               meta
+  '/'                  home         HomeView.vue                              —
+  '/cart'              cart         CartView.vue                              —
+  '/favorites'         favorites    FavoritesView.vue                         —
+  '/products'          allProducts  AllProductsView.vue                       —
+  '/checkout'          checkout     CheckoutView.vue                          requiresAuth: true
+  '/product/:id'       product      product/ProductDetailView.vue              —
+  '/category/:cat'     category     category/CategoryView.vue  props:true     —
+  '/login'             login        LoginView.vue                             noAuth: true
+  '/register'          register     RegisterView.vue                          noAuth: true
+  '/profile'           profile      ProfileView.vue                           requiresAuth: true
+
+【路由守卫 beforeEach】（决定"能不能跳 / 跳去那里"）
+  - 要跳的路由 meta.requiresAuth=true 且 isLoggedIn=false
+      → return { path: '/login', query: { redirect: to.fullPath } }
+        （登录后 LoginView.vue 会读 query.redirect 还原到原目标，而不是一律跳 profile）
+  - 要跳的路由 meta.noAuth=true 且 isLoggedIn=true（已登录却打开登录/注册）
+      → return { path: '/profile' }
+        避免重复登录/注册
+
+【scrollBehavior】(决定"跳过去后滚动条停在哪")
+  - savedPosition 存在（浏览器 ←/→ 前进后退）→ 返回 savedPosition，用户滚动位置保持不变
+  - 其他情况（点击Logo / 按钮 / router.push）→ 返回 {top:0, behavior:'smooth'}
+    修复从商品详情(>2000px高度)滚到底部再回首页看到的"空白"（实际是停在 y=2000+）的问题
+
+【模块跳转方式】
+  全工程所有跳转都统一用 Vue Router 的两种方式：
+    1) SFC 脚本：import { useRouter } from 'vue-router'
+                const router = useRouter()
+                router.push('/products')
+                router.push({ path: '/profile', query: { tab: 'addresses' } })
+       常用入口：HomeView "查看全部" → /products；Checkout 无地址 → /profile?tab=addresses；…
+    2) 用户点击浏览器 ←/→：由 scrollBehavior savedPosition 还原
+
+
+------------------------------------------------------------------
+B.6 src/components/HeaderNav.vue  ——  全局导航（所有页面共享的跳转枢纽）
+------------------------------------------------------------------
+【布局三块】左 Logo / 中搜索 / 右操作
+
+【左 Logo】
+  绑定 @click.prevent="router.push('/')" → 跳转首页。SVG 是自定义购物袋图标。
+
+【中搜索框】
+  状态：searchKeyword ref（双向绑定）
+  方法：handleSearch()  —— 目前是占位，只打印 console.log；TODO 注释说明应跳 /search 路由
+  触发：@keyup.enter 或右侧"搜索"按钮点击
+
+【右操作（4 个入口）】
+  1) 收藏夹按钮 handleFavClick → router.push('/favorites')
+     数量角标 favCount = favorites.items.length （>99 显示 99+，粉红背景）
+  2) 购物车按钮 handleCartClick → router.push('/cart')
+     数量角标 cartCount = cart.items 所有 quantity 合计（红圆）
+  3) 用户头像 handleUserClick
+       isLoggedIn = true  → /profile  用户中心
+       isLoggedIn = false → /login    登录
+     头像来源：DiceBear API 按 username 或 'Guest' 生成 SVG 头像
+
+【样式】sticky + 毛玻璃 backdrop-filter + 底部 1px 分隔线，1280px 限宽居中，响应式断点。
+
+
+------------------------------------------------------------------
+B.7 src/stores/  状态管理层（所有业务数据的 Single Source of Truth）
+------------------------------------------------------------------
+每个文件都符合统一模式：
+  interface DataType → const STORAGE_KEY → load() 读 localStorage → reactive state → save()
+  → 导出 useXxx() 返回 state 供视图引用；导出具体 action 函数（toggle/add/remove/...）
+  → 导出 computed 做筛选/汇总。
+
+下面逐个文件说明：
+
+B.7.1 user.ts — 用户
+  接口：User {username, password, createdAt}
+        CurrentUser {username, loginAt}
+  持久化：shop_users（已注册账号列表） + shop_current_user（当前登录）
+  导出：
+    isLoggedIn = computed(state.current !== null)  —— 路由守卫用；ProfileView / Checkout 登录态判定
+    currentUsername = computed(当前用户名 or '')   —— HeaderNav 头像名；订单默认地址收货人
+    register(username,password) → 校验：长度 + 去重 → 写 shop_users
+    login(username,password)    → 比对 shop_users → 写 shop_current_user
+    logout()                    → 清掉 shop_current_user
+  谁依赖：router/index.ts、HeaderNav、LoginView、RegisterView、ProfileView、stores/addresses.ts
+
+B.7.2 cart.ts — 购物车
+  接口：CartItem { id,name,desc?,price,originalPrice?,emoji,bgColor,quantity,selected,promotions? }
+  持久化：shop_cart；load() 时自动给老数据补 selected=true 默认
+  响应式 state：{items: CartItem[]}
+  核心 action：
+    addToCart(item, qty=1)   ——  存在则数量加 qty，不存在 push 默认 selected=true
+    removeFromCart(id)       —— 单项删
+    removeFromCartBatch(ids) —— 批量删
+    updateQuantity(id, qty)  —— qty≤0 自动删
+    toggleSelected(id)       —— 单行 checkbox 切换
+    selectAll(checked)       —— 顶部全选
+    moveToFavorites(ids)     —— 不删，仅返回 items 子集（用户要求移入后仍保留购物车）
+    clearCart()              —— 创建订单 createOrder 后调用，清空结算完毕的购物车
+  computed（视图直接渲染）：
+    selectedItems  勾选中的商品（结算用）
+    selectedTotal  选中商品金额合计（Checkout 费用明细）
+    isAllSelected  列表顶部全选 checkbox 的 checked 值
+  谁依赖：HeaderNav（购物车角标）、HomeView/CategoryView/ProductDetailView/AllProductsView（加购）、
+          CartView、ProfileView（购物车 Tab）、stores/orders.ts createOrder
+
+B.7.3 favorites.ts — 收藏夹
+  接口：FavoriteItem { id,name,price,emoji,bgColor,addedAt }
+  持久化：shop_favorites
+  action：
+    isFavorite(id): boolean              商品详情 ❤️ 按钮状态
+    addToFavorite(item)                  去重后 push
+    removeFromFavorite(id)               FavoritesView / ProfileView 单项取消
+    toggleFavorite(item)                 ❤️ 切换
+  computed：通过 useFavorites().items 渲染
+  谁依赖：HeaderNav 角标、FavoritesView、ProductDetailView 收藏按钮、ProfileView 收藏夹 Tab、
+          CartView（批量移入收藏 -> addToFavorite）
+
+B.7.4 history.ts — 浏览历史
+  接口：HistoryItem {id,name,emoji,bgColor,viewedAt}
+  持久化：shop_history；上限 50 条
+  action：
+    recordView(omit viewedAt)   —— 先去重 splice，再 unshift 顶掉最老超出的 50 条以外；save
+                                  调用点：HomeView/CategoryView/AllProductsView/CartView 推荐区/ProfileView 不调
+                                  只有 ProductDetailView goDetail() 才会 recordView
+    clearHistory()              —— ProfileView 浏览历史 Tab "清空历史"按钮
+  谁依赖：ProductDetailView（写）、ProfileView（渲染；整行点击跳 /product/:id）
+
+B.7.5 shops.ts — 关注店铺
+  接口：Shop { id,name,logo,bgColor,followers,rating,followedAt? }
+  数据策略：店铺列表（defaultShops 6 个 Demo 店铺）固定写死，不按 id 增长
+            用户关注存在 shop_followed_shops，只存 id 列表，不存整 Shop
+  响应式 state：{all: Shop[], followedIds: number[]}
+  核心：
+    followedShops = computed( 从 all 里按 followedIds 过滤出已关注的 Shop[] )
+    isFollowed(shopId)/followShop/unfollowShop/toggleFollow
+  谁依赖：ProfileView（🏪 关注店铺 Tab 展示 followedShops；未关注按钮显示 "关注"/"已关注"）
+          ProductDetailView 店铺条：商品 → SHOPS[product.category] 对应店铺；显示关注按钮
+
+B.7.6 reviews.ts — 评价管理
+  接口：Review { id,productId,productName,productEmoji,productBgColor,orderId?,rating,content,createdAt }
+  持久化：shop_reviews
+  工具：genReviewId → 'r_' + 36进制时间 + 随机码（毫秒级重复避免）
+  action：
+    addReview(Omit id+createdAt)   —— 订单 Tab「评价」弹窗确认后 / ProfileView + Demo
+    updateReview(id, {rating?,content?})   —— 改评价（预留）
+    deleteReview(id)                        —— 单项删
+    hasReviewed(productId)                  —— 订单 Tab「⭐去评价/已评价」状态
+  谁依赖：ProfileView ⭐评价管理 Tab、订单 Tab 每个完成订单的"评价"按钮
+          ProductDetailView 评价列表：所有 list.filter productId 匹配的 Review[]
+
+B.7.7 coupons.ts — 优惠券
+  类型：
+    CouponScope = 'all'/'digital'/'fashion'/'homegoods'/'newuser'
+    scopeLabel（中文名）/ scopeColor（主题色）  —— ProfileView Tab / 券卡片 渲染
+    Coupon { id,title,value,threshold,scope,desc?,claimedAt,startAt,endAt,usedAt? }
+  持久化：shop_coupons
+  computed（最核心的 3 个分组）：
+    availableCoupons = 未使用 且 startAt ≤ now ≤ endAt   （可用券 Tab）
+    usedCoupons      = usedAt 有值                       （已使用 Tab）
+    expiredCoupons   = 未使用 且 endAt < now              （已过期 Tab）
+  action：
+    claimCoupon({…, durationDays?, startDelayHours?})  —— 领一张券（时间自动算）
+    useCoupon(id)        —— 核销（预留）；已用/过期 false
+    removeCoupon(id)     —— 券卡片上的删除按钮
+    formatCouponDate(ts) —— YYYY.MM.DD，用于卡片有效期
+    remainingDays(endAt) —— 还有几天到期；≤3 天显示红色警告
+    ensureInitCoupons()  —— ProfileView 初始化调；若 0 条则塞 5 张 Demo（可用3/过期1/已用1）
+  谁依赖：ProfileView 🎟️ 优惠券 Tab（三个子 Tab 用三个 computed）、
+
+B.7.8 addresses.ts — 收货地址（按用户隔离！）
+  接口：Address { id,name,phone,region,detail,isDefault,createdAt,updatedAt }
+  持久化：shop_addresses → Record<username, Address[]>（按用户名隔离，多账号不冲突）
+  响应式 state：{ list: Address[] }
+    重载逻辑 reloadCurrentUser()：watch [currentUsername, isLoggedIn] 变化，
+    根据当前登录用户把地址从 DB 读并排序列出（默认在前、updatedAt 倒序），未登录返回 []
+  核心 action：
+    addAddress({name, phone, region, detail, isDefault?})   —— 校验 + 默认地址处理（首条自动默认；
+                                                              isDefault=true 时先把其他地址取消默认）
+    updateAddress(id, partial)                               —— 同 addAddress 处理默认唯一性
+    deleteAddress(id)                                         —— 若删的是默认且还有其他地址，剩余第 1 条自动升默认
+    setDefaultAddress(id)                                     —— 全用户只允许 1 个 true
+    内置 validate()：姓名 20/手机号^1[3-9]\d{9}$/省市区非空/详细地址 120 字
+    defaultAddress = computed()（默认地址 或 第 1 条 或 null）
+  谁依赖：
+    ProfileView 📍 地址管理 Tab — 列表 + 增/改/删 + 设默认
+    CheckoutView 地址模块      — 取默认地址 或 用户在弹窗选择的地址（selectedAddressId）、新建地址调 addAddress
+
+B.7.9 orders.ts — 订单（订单状态机 + 时间戳/物流/退款生成）
+  类型：
+    OrderItem { id,name,price,emoji,quantity }
+    OrderStatus = 'pending' | 'paid' | 'shipped' | 'done' | 'cancelled' | 'refunding' | 'refunded'
+    LogisticsNode {time,status,isNew?}
+    InvoiceInfo {type,title,taxNo?,content,issued}
+    RefundInfo {appliedAt,reason,amount,status:'审核中'|'已同意'|'已拒绝'}
+    Order { id,items,totalAmount,status,createdAt, [paidAt|shippedAt|doneAt|cancelledAt]?, logistics?, remark?, invoice?, refund?, payMethod? }
+  持久化：shop_orders
+  工具：genOrderId → YYYYMMDDhhmmss + 4 位随机；fmt() 时间格式化；buildLogistics(status) 生成 Mock 物流
+  核心 action：
+    createOrder(cartItems, {remark?, invoice?})   —— CartView 去结算 / 详情立即购买调用
+                                                    生成 pending 订单 + 调用 clearCart()
+    updateOrderStatus(orderId, status, {payMethod?})
+         —— 状态机核心：
+             → paid：写 paidAt+payMethod+初始物流（"等待商家发货"）；setTimeout 2000 自动变成 shipped
+             → shipped：写 shippedAt+完整 3 段物流（转运/分拨/派送）
+             → done：写 doneAt
+             → cancelled：写 cancelledAt
+    cancelOrder(orderId) —— 仅 pending 可以；ProfileView 订单 Tab 取消按钮
+    setOrderRemark(orderId, text) —— 订单备注
+    applyRefund(orderId, reason)
+         —— paid/shipped/done 才能申请 → refunding → setTimeout 2s → refunded
+    copyOrderId(orderId) —— 剪贴板：优先 navigator.clipboard，不支持时 textarea + execCommand
+  谁依赖：
+    CartView、ProductDetailView（createOrder → /checkout）
+    CheckoutView（updateOrderStatus → paid / cancelled）
+    ProfileView 我的订单 Tab（订单列表、状态显示、操作按钮、退款/备注/复制/物流弹窗）
+
+B.7.10 products.ts — 商品唯一数据源（Canonical Registry）
+  类型：Product { id,name,desc?,price,originalPrice?,emoji,bgColor,sales,tag?,category }
+        ProductCategory = 'digital' | 'fashion' | 'homegoods' | 'newuser' | 'daily'
+  ID 规则（用于 CategoryView / AllProductsView 过滤，必须对齐）：
+    digital 数码 100-199
+    fashion 穿搭 200-299
+    homegoods 家具 300-399
+    newuser 新人 400-499
+    daily 日用 500-599
+  常量：CATEGORY_NAMES / SHOPS（每分类对应店铺信息）/ PRODUCTS 大数组（商品详情/看了又看/分类页/全部商品页都从这里取）
+  导出函数：
+    getProductById(id) → Product | undefined   —— 详情页 / Checkout 加购 / 订单"再次购买"
+    getProductsByCategory(cat)                   —— CategoryView 直接用
+    getCategoryName(cat)                         —— 结果信息条 / AllProducts / Category 页标题
+    getRelatedProducts(id, limit=4)              —— 详情页底部"看了又看"
+    getProductRating(id)                         —— 详情页评分（稳定函数：4.6+(id%4)*0.1）
+    getReviewCount(sales)                        —— 详情页"全部评价 xxx 条"
+    formatSales(num)                             —— 销量 x.x万 格式化
+    allProducts = PRODUCTS                       —— AllProductsView 全部商品入口
+
+------------------------------------------------------------------
+B.8 src/views/  页面级组件
+------------------------------------------------------------------
+
+B.8.1 HomeView.vue — 首页
+【职责】欢迎横幅文案 + 轮播 4 个分类（点击跳转 /category/xxx）+ 热销商品 8 件网格
+【功能 & 跳转】
+  - 轮播 banners：[{route: '/category/digital',...}, ...]；点击 → router.push(banner.route)
+  - 热销卡片 8 件：
+      整卡点击 → goDetail(p) → recordView(p) + router.push(`/product/${p.id}`)
+      右下「🛒 加入购物车」→ addToCart(p)（cart store）
+      标签角标 tagClass() 决定颜色（热销红/新品绿/限时黄）
+  - 右上角「查看全部 ›」 → router.push('/products')（AllProductsView）
+【数据来源】页面内局部 Mock 商品数组 8 件（仅用于首页骨架预览；实际分类/详情页数据读 products.ts canonical registry）
+
+B.8.2 AllProductsView.vue — 全部商品「查看全部」
+【路由】/products
+【功能】
+  顶部面包屑 / 标题；搜索框（商品名/副标题）；排序 Select（综合/销量/价↑/价↓/最新）
+  分类 Tab 6 个：全部 / 数码/穿搭/家具/新人/日用 —— 每个 Tab 带 categoryCount 数量角标（按 id 百位数统计）
+  结果信息条：分类中文名 + 过滤结果数量；空态：🔍 图标 + 重置条件 / 返回首页 两个按钮
+  商品网格（同首页风格卡片）：卡片 → goDetail(p)；右下按钮 addToCart(p)
+【核心计算属性】
+  filteredProducts = 按 activeCategory → id 范围过滤；按 keyword trim().toLowerCase() 过滤 name/desc；
+                    按 sortKey switch 排序分支。
+【依赖】allProducts / getCategoryName / getProductById（products store）+ recordView + addToCart
+【谁来】HomeView "查看全部 ›" 按钮 → /products
+
+B.8.3 CartView.vue — 购物车
+【路由】/cart
+【功能】
+  - 顶栏：搜索（按 name 过滤）+ 选中计数 + 批量（批量删除/批量移入收藏，先 confirm）
+  - 商品列表：checkbox selected；emoji + 名称/规格；单价；改数量（number input 带 +/-）；单项"移入收藏/删除"
+  - 底部栏：已选 X 件；合计；"去结算"按钮
+    "去结算"：先校验已登录（否则 /login?redirect=/cart）→ createOrder(selectedItems) → /checkout?orderId=xxx
+  - 空态：🛒 暂无 + 去逛逛 按钮（router.push('/')）
+【决策函数】
+  批量删：removeFromCartBatch(selectedItems.map id)
+  批量移入收藏：forEach cartItem→addToFavorite({ ... })（保留在购物车）
+  去结算：createOrder → 若返回 null（空）就 alert，否则 push checkout
+
+B.8.4 FavoritesView.vue — 收藏夹独立页
+【路由】/favorites
+【功能】
+  搜索框；顶栏计数 + "去购物车"跳转
+  卡片网格（同首页）：整卡跳详情；右下按钮 取消收藏/加购
+  取消收藏：handleRemove(addr) → pendingRemoveId = id → 显示 confirm 弹窗 → confirmRemove 真正 removeFromFavorite
+  空态：❤️ 暂无 + 去首页
+【依赖】favorites store
+
+B.8.5 LoginView.vue — 登录页
+【路由】/login（meta.noAuth）
+【功能】表单 username/password；"没有账号？立即注册" → /register
+  登录失败：红色错误条；登录成功：
+    const redirect = route.query.redirect as string | undefined
+    router.push(redirect ?? '/profile')
+【决策】stores/user.ts login(username, password)
+
+B.8.6 RegisterView.vue — 注册页
+【路由】/register（meta.noAuth）
+【功能】用户名/密码/确认密码三项 + 注册校验（长度/两次密码一致/重名）
+  成功：alert → router.push('/login')；失败：红错误条
+
+B.8.7 ProfileView.vue — 用户中心（核心：一个页面 8 个 Tab，占全量业务 50%）
+【路由】/profile（meta.requiresAuth）；支持 query ?tab=xxx 直接切（如 Checkout 跳 "地址管理"用）
+【顶部信息块】头像（DiceBear 按用户名生成）+ 账号 + 注册时间 + 订单统计（各状态订单数角标快捷入口）
+【8 个 Tab】
+  1 🛒 购物车       — CartView 相同组件（复用 Cart store）+ 去购物车按钮跳 /cart
+  2 🎟️ 优惠券      — 可用/已用/过期 3 子 Tab；count=availableCoupons.length；券样式渐变+scope 颜色
+  3 ❤️ 收藏夹      — FavoritesView 同逻辑 + 单条取消 confirm 弹窗 + 去收藏夹按钮跳 /favorites
+  4 📍 地址管理     — 新增（导入 stores/addresses.ts，新增/编辑/删除/设默认）
+                       address-list 卡片：默认紫边 + 默认角标 + 手机号打码 maskPhone
+                       弹窗表单：addrDialog.addr（addrForm = 姓名/手机/地区/详细 + 默认勾选 + 错误提示）
+  5 🏪 关注店铺     — shops.followedShops computed
+  6 🕐 浏览历史     — history.items；整行 click → router.push(`/product/${h.id}`)（用户需求"浏览记录点一下跳详情"）
+                       清空历史 → handleClearHistory() 调 window.confirm
+  7 📦 我的订单     — 订单搜索、8 状态子 Tab（全部/待付款/已付/已发/已完/退款中/已退/已取消）
+                       订单卡片：
+                         · 时间线：下单→付款(显示支付方式)→发货→完成。根据 paidAt/shippedAt/doneAt 是否存在渲染
+                         · pending：按钮 "取消订单/继续支付（→/checkout?orderId=id）/复制/备注"
+                         · paid/shipped：物流弹窗/申请退款/发票弹窗
+                         · shipped + done：发货后"确认收货" → updateOrderStatus(id, 'done')
+                         · done：⭐评价 → 评价弹窗（star rating + 文字）→ addReview
+                       通用弹窗（一个 .review-modal-mask 复用）：
+                         · 备注、退款、发票、物流、地址新增/编辑、评价等
+  8 ⭐ 评价管理     — reviews.list 渲染；单项删除（带 confirm）/ 新增 Demo 评价
+【通用功能】
+  复制订单号 → copyOrderId(orderId)；
+  订单申请退款 → applyRefund(id, reason)；Mock setTimeout 2 秒自动通过
+  订单状态色 → orderStatusClass(status)（8 状态不同色）
+  评价星星渲染 → starRow(rating)
+
+B.8.8 category/CategoryView.vue — 分类页（一个组件，路由 props 分发）
+【路由】/category/:category（props:true）；四个分类共用这一个组件
+【props】category: ProductCategory | 'xxx'
+【功能】
+  - 根据路由 props.category 展示不同标题 + 配色（数码紫/穿搭粉/家具橙/新人红）+ 分类 banner 大色块
+  - 子分类 chips（例如数码=手机/耳机/手表/充电…；点选中高亮但数据不过滤，只做 UI 占位）
+  - 商品列表 getProductsByCategory(category)
+  - 每张卡：goDetail(p) / addToCart(p)
+【决策函数】分类不存在 → 空态；getProductsByCategory 返回 [] → 空态
+【入口】HomeView 轮播图跳转 /category/digital 等；首页顶部四个分类按钮。
+
+B.8.9 product/ProductDetailView.vue — 商品详情
+【路由】/product/:id
+【功能布局】
+  · 顶部返回 → router.back() + 分享占位
+  · 左：主图（大）+ 4 张缩略图切换（index 决定；hover 高亮）
+  · 右：标题/副标题 + 价格区（现价红/原价划线/优惠胶囊省¥）+ 月销量、评价数
+       · 规格区（容量/颜色 作为按钮 group，选完显示"已选：xxx / 数量：stepper"）
+       · 底部按钮：❤️收藏 toggleFavorite / 🛒加入购物车 / 🔴立即购买
+  · 店铺条：对应 SHOPS[product.category] 店铺；toggleFollow(店铺 id)；"进店看看"占位
+  · 选项卡卡：商品详情 / 用户评价 / 规格参数 / 图文详情
+       · 用户评价：本地 reviews 过滤 + 生成若干合成评价（按 id 稳定）
+  · 底部"看了又看"getRelatedProducts(product.id, 4)，每个卡跳详情/加购
+【立即购买的决策流程】（按工程约束：先加购再 createOrder 再跳）
+  1) 未登录 → /login?redirect=/product/:id
+  2) 已登录 → 先 selectAll(false) 清空购物车勾选状态 → addToCart 这个商品 1 件 →
+     → createOrder(selectedItems)（只会包含刚加的那一件）→ /checkout?orderId=xxx
+【数据获取】
+  route.params.id 调 getProductById(id)。失败（id 不存在）→ 空态「宝贝已下架」+ 返回首页
+
+B.8.10 CheckoutView.vue — 收银台/付款跳转界面（重点：地址选择弹窗 + 倒计时）
+【路由】/checkout（meta.requiresAuth），入口总是带 ?orderId=xxx
+【布局】左列（订单状态条 / 地址卡 / 商品清单卡 / 支付方式卡）；右列 sticky（费用卡 + 立即支付按钮）
+
+【订单状态条】
+  · 订单号（等宽字体）/ 下单时间；15 分钟倒计时
+     → 超时后按钮禁用 + 点击立即自动 updateOrderStatus(id, 'cancelled') + 跳 /cart
+  · 无订单："📋 订单不存在或已过期"空态
+
+【地址卡 + 弹窗】（用户本次需求三条：1.下拉已有 2.新建并默认选中 3.不改用户的默认地址）
+  · 默认显示 selectedAddress = addresses.list.find(id=selectedAddressId) ?? defaultAddress.value
+    selectedAddressId 初始为 defaultAddress.id；若 defaultAddress 后来发生变化但 selectedAddressId 已经选过就不覆盖
+  · 点卡片或右上"修改 ▾"按钮 → 打开地址弹窗
+  · 弹窗双模式（addrDialog.mode = 'select' | 'new'）：
+      select 模式：已有地址选项卡 + 默认角标 + 单选 active 样式；末尾一张虚线紫色「➕新建收货地址」
+      new    模式：返回选择 → 表单（4 字段 + 校验错误条 + 提示"不会改默认地址"）
+                  提交 → addAddress(..., isDefault=false)  —— 保证用户中心默认地址不动！
+                          → 自动 selectedAddressId = 新地址 id → 关弹窗
+  · 未选地址 + 立即支付 → alert + 打开地址弹窗（不再跳 /profile）
+
+【商品清单卡】按 order.items 渲染小计
+
+【支付方式卡】三选一单选卡片（微信/支付宝/银行卡），选中高亮+✓对勾
+  当前选择 → handlePay 里会按选择把 payMethod 文案传给 updateOrderStatus extra
+
+【费用卡】sticky 右列
+  商品总额 selectedTotal（cart store）+ 运费（≥99 免邮否则 8 元，预留优惠券抵扣）
+  → 实付合计大红数字
+  → 立即支付按钮（橙红渐变）+ paying 加载态 + disabled（已支付/超时/未选地址）
+【handlePay 流程】
+  1. 未选地址 → openAddrDialog()
+  2. 已支付 → alert 重复 → /profile
+  3. 超时 → updateOrderStatus cancelled → /cart
+  4. 否则：paying=true；setTimeout 模拟网关 800ms → updateOrderStatus(id, 'paid', { payMethod })
+     → alert 支付成功详情 → router.push('/profile')（用户中心订单 Tab 会看到状态=已付款，2 秒后自动发货）
+
+
+------------------------------------------------------------------
+B.9 src/api/  后端接口层（★ 已预埋完成，当前默认不启用）
+------------------------------------------------------------------
+【设计原则：现在"不连后端"是怎么保证的？】
+  - 总开关 src/api/config.ts 里 USE_BACKEND = false，
+    request() 函数第一行就拦截并抛 ApiError("后端未开启")，
+    全程不会发出任何网络请求。
+  - 所有 stores 依旧读写 localStorage，所有页面行为与之前完全一样。
+  - 换句话说：api/ 是一条"预埋好的管线"，铺好了但没通水。
+
+【与 stores 的关系】
+  - stores/*.ts   = 现在的数据源（localStorage，唯一在被使用的）
+  - api/*.ts      = 将来的数据源（HTTP 请求，备而未用）
+  - 两者接口刻意对齐（ApiXxx 类型字段与 store 里同名 interface 一致），
+    迁移时视图层几乎不用改字段名。
+
+【文件分类速览：2 个基础设施 + 7 个业务接口】
+  一、基础设施（所有请求的底层支撑）
+    config.ts    全局开关 + 配置（连不连后端只看这一个文件）
+    request.ts   HTTP 请求封装（拼 URL/注 token/超时/解包响应/统一错误）
+  二、业务接口（每个对应一个 store，函数统一 apiXxx 前缀）
+    user.ts      ← stores/user.ts      注册/登录(自动存token)/登出/个人信息
+    product.ts   ← stores/products.ts  商品列表(分类/搜索/分页)/商品详情
+    cart.ts      ← stores/cart.ts      购物车查/加/改数量/选中/批量删/清空
+    order.ts     ← stores/orders.ts    订单创建/查询/支付/取消/退款/备注
+    favorite.ts  ← stores/favorites.ts 收藏查/加/取消
+    address.ts   ← stores/addresses.ts 地址查/增/改/删/设默认
+    coupon.ts    ← stores/coupons.ts   优惠券列表分组(可用/已用/过期)/领取/核销
+  注：浏览历史/关注店铺/评价 3 个模块暂未预埋，需要时按同样模式补充即可。
+
+【调用链（将来启用后端时）】
+  View 页面 → stores/*.ts → api/*.ts → request.ts → fetch → 后端
+                          ↑               ↑
+                   字段类型对齐      统一拼 URL/加 token/超时/错误处理
+
+B.9.1 config.ts —— 全局配置 / 唯一开关（连不连后端只看这一个文件）
+  USE_BACKEND      false = 纯前端 localStorage 模式（现在）；true = 真实后端模式
+  API_BASE_URL     后端地址，如 'http://localhost:8000'；走 vite 代理时改为 ''
+  API_PREFIX       统一路由前缀 '/api'
+  REQUEST_TIMEOUT  超时 10 秒（AbortController 自动中止）
+  TOKEN_KEY        登录 token 的 localStorage 键（'shop_token'）
+
+B.9.2 request.ts —— HTTP 请求封装（原生 fetch 实现，不引入 axios，零新依赖）
+  导出：
+    ApiError 类                       统一错误（code 业务码 / status HTTP 码 / message 提示）
+    getToken() / setToken() / clearToken()   token 三件套
+    request(method, url, body?, params?)     所有业务接口的唯一出口
+  request() 内部流程：
+    ① USE_BACKEND=false → 直接抛"后端未开启"（不发请求）
+    ② 拼 URL：API_BASE_URL + API_PREFIX + url + querystring（undefined 参数自动过滤）
+    ③ 请求头：Content-Type: application/json + Authorization: Bearer <token>（有 token 才带）
+    ④ AbortController 10 秒超时
+    ⑤ 响应约定 { code, message, data }：code===0 → 返回 data；否则抛 ApiError(message)
+    ⑥ HTTP 401 → clearToken() + 抛"登录已过期"（将来可在此跳 /login）
+    ⑦ 网络异常/超时 → 包装成友好文案的 ApiError
+  后端响应格式约定（所有接口统一）：
+    成功 { "code": 0, "message": "ok", "data": ... }
+    失败 { "code": 非0, "message": "错误提示", "data": null }
+
+B.9.3 业务接口文件（每个文件 = 对应 store 的"远程版"，函数统一 apiXxx 前缀）
+  user.ts      apiRegister / apiLogin(成功自动 setToken) / apiLogout(自动 clearToken) / apiGetProfile
+  product.ts   apiGetProductList({category?, keyword?, page?, pageSize?}) / apiGetProductDetail(id)
+  cart.ts      apiGetCart / apiAddToCart(item, qty) / apiUpdateCartQuantity / apiToggleCartSelected
+               / apiSelectAllCart / apiRemoveCartItems(ids[]) / apiClearCart
+  order.ts     apiCreateOrder(items, {remark?}) / apiGetOrderList(status?) / apiGetOrderDetail
+               / apiPayOrder(id, payMethod) / apiCancelOrder / apiApplyRefund(id, reason)
+               / apiUpdateOrderRemark
+  favorite.ts  apiGetFavorites / apiAddFavorite / apiRemoveFavorite
+  address.ts   apiGetAddressList / apiCreateAddress / apiUpdateAddress(id, partial)
+               / apiDeleteAddress / apiSetDefaultAddress
+  coupon.ts    apiGetCoupons('available'|'used'|'expired'?) / apiClaimCoupon / apiUseCoupon(id, orderId?)
+  注：浏览历史 / 关注店铺 / 评价 3 个模块暂未预埋，需要时按同样模式
+      （"新建 api/xxx.ts + request() + apiXxx 函数 + 注释写清 store 对照"）补充即可。
+
+【将来启用后端只需 3 步】
+  ① src/api/config.ts     → USE_BACKEND 改 true；API_BASE_URL 填后端地址（配合代理则改 ''）
+  ② vite.config.ts        → 解开 server.proxy 注释，target 填后端地址（解决浏览器跨域）
+  ③ 按 B.9.4 对照表逐模块把 store 里的 localStorage 逻辑替换为 api 调用
+    （替换哪个模块哪个模块生效，未替换的继续走本地，可以渐进式迁移）
+
+B.9.4 store → api 迁移对照表（联调时照着改）
+  stores/user.ts      register / login / logout            → user.ts     apiRegister / apiLogin / apiLogout
+  stores/products.ts  getProductById / getProductsByCategory / allProducts
+                                                           → product.ts  apiGetProductDetail / apiGetProductList
+  stores/cart.ts      addToCart / removeFromCart(Batch) / updateQuantity / toggleSelected / selectAll / clearCart
+                                                           → cart.ts     apiAddToCart / apiRemoveCartItems / apiUpdateCartQuantity / apiToggleCartSelected / apiSelectAllCart / apiClearCart
+  stores/orders.ts    createOrder / updateOrderStatus(paid) / cancelOrder / applyRefund / setOrderRemark
+                                                           → order.ts    apiCreateOrder / apiPayOrder / apiCancelOrder / apiApplyRefund / apiUpdateOrderRemark
+  stores/favorites.ts addToFavorite / removeFromFavorite   → favorite.ts apiAddFavorite / apiRemoveFavorite
+  stores/addresses.ts addAddress / updateAddress / deleteAddress / setDefaultAddress
+                                                           → address.ts  apiCreateAddress / apiUpdateAddress / apiDeleteAddress / apiSetDefaultAddress
+  stores/coupons.ts   available/used/expired 三个 computed / claimCoupon / useCoupon
+                                                           → coupon.ts   apiGetCoupons(status) / apiClaimCoupon / apiUseCoupon
+
+【后端接口路径总览（假定约定，后端可调整）】
+  POST   /api/auth/register        注册
+  POST   /api/auth/login           登录 → { token, user }
+  POST   /api/auth/logout          登出
+  GET    /api/user/profile         个人信息
+  GET    /api/products             商品列表（?category=&keyword=&page=&pageSize=）
+  GET    /api/products/:id         商品详情
+  GET    /api/cart                 购物车列表
+  POST   /api/cart                 加入购物车
+  PUT    /api/cart/:id             改数量
+  PUT    /api/cart/:id/selected    单条选中
+  PUT    /api/cart/selected-all    全选
+  DELETE /api/cart                 批量删除（body: {ids})
+  DELETE /api/cart/all             清空
+  POST   /api/orders               创建订单
+  GET    /api/orders               订单列表（?status=）
+  GET    /api/orders/:id           订单详情
+  POST   /api/orders/:id/pay       支付
+  POST   /api/orders/:id/cancel    取消
+  POST   /api/orders/:id/refund    申请退款
+  PUT    /api/orders/:id/remark    订单备注
+  GET    /api/favorites            收藏列表
+  POST   /api/favorites            添加收藏
+  DELETE /api/favorites/:id        取消收藏
+  GET    /api/addresses            地址列表
+  POST   /api/addresses            新建地址
+  PUT    /api/addresses/:id        修改地址
+  DELETE /api/addresses/:id        删除地址
+  PUT    /api/addresses/:id/default 设默认地址
+  GET    /api/coupons              优惠券列表（?status=）
+  POST   /api/coupons              领券
+  POST   /api/coupons/:id/use      核销
+
+
+================================================================================
+Part C — 模块跳转与决策函数速查表
+================================================================================
+
+【页面跳转总览】
+  HeaderNav 四个跳转枢纽：
+    Logo                → /
+    🔍 搜索             → handleSearch（TODO /search）
+    ❤️ 收藏            → /favorites
+    🛒 购物车           → /cart
+    👤 头像
+      未登录             → /login
+      已登录             → /profile
+
+  首页 HomeView：
+    轮播 4 分类         → /category/<digital|fashion|homegoods|newuser>
+    商品卡片           → /product/:id
+    加入购物车         → addToCart(cart store)
+    查看全部 ›         → /products（AllProductsView）
+
+  分类 CategoryView(/category/:category)：
+    卡片               → /product/:id
+    加购               → addToCart
+
+  全部商品 AllProductsView(/products)：
+    卡片               → /product/:id
+    重置/返回首页       → /
+
+  详情 ProductDetailView(/product/:id)：
+    返回               → router.back()
+    加入购物车         → addToCart
+    立即购买           → addToCart + createOrder + /checkout?orderId=xxx
+    看了又看卡片       → /product/:id
+    店铺条 关注按钮    → toggleFollow(shopId)
+
+  购物车 CartView(/cart)：
+    单项删除           → removeFromCart
+    批量删除           → confirm + removeFromCartBatch
+    单项/批量移入收藏   → addToFavorite
+    改数量             → updateQuantity
+    去结算             → createOrder(selectedItems) + /checkout?orderId=xxx
+    猜你喜欢 卡片      → /product/:id
+
+  收藏夹 FavoritesView(/favorites)：
+    取消收藏           → confirm 弹窗 + removeFromFavorite
+    加购               → addToCart
+    去购物车           → /cart
+    去首页             → /
+
+  收银台 CheckoutView(/checkout)：
+    地址选择弹窗       → select（直接用）/ new（addAddress(isDefault=false) + 自动选中）
+    支付方式           → 单选卡 → 支付方式存入订单 payMethod
+    立即支付           → updateOrderStatus(id, 'paid') → /profile
+    超时自动取消       → updateOrderStatus(id, 'cancelled') → /cart
+
+  登录 LoginView：
+    注册链接           → /register
+    登录成功           → 优先 redirect query 否则 /profile
+
+  注册 RegisterView：
+    注册成功           → /login
+
+  用户中心 ProfileView(/profile)：
+    八个 Tab 内嵌切换（不路由）：
+      cart        购物车   → 列表项跳 /product/:id ；去购物车 → /cart
+      coupons     优惠券   → 3 子 Tab（可用/已用/过期）
+      favorites   收藏夹   → 单项取消；去收藏夹 → /favorites
+      addresses   地址管理 → 增/改/删/设默认（直接改 addresses store）；从收银台跳 ?tab=addresses
+      shops       关注店铺 → follow/unfollow
+      history     浏览历史 → 点击整行 → /product/:id
+      orders      我的订单 → 详情/取消/继续支付/退款/发票/物流/评价/复制单号
+                                 继续支付 → /checkout?orderId=id
+      reviews     评价管理 → 增/删 评价
+
+【功能决策函数（"业务是否允许"的判断入口）】
+  登录态：isLoggedIn（user store）；router meta.requiresAuth / noAuth 在守卫
+  是否可以取消订单：order.status === 'pending' — cancelOrder
+  是否可以申请退款：['paid','shipped','done'].includes(order.status) — applyRefund
+  是否已经评价过：hasReviewed(productId) — 订单"评价"按钮文案
+  优惠券可用判断：availableCoupons computed — 比较 usedAt/startAt/endAt/Date.now()
+  浏览历史去重：recordView 先 findIndex splice 再 unshift
+  购物车选择合计：selectedTotal computed
+  地址唯一性：每个地址 action 内部先取消其他地址的 isDefault，保证用户只有一个默认
+  订单唯一：genOrderId 时间+随机码；createOrder 后 push 再 save
+  物流节点：根据 paid/shipped 状态生成 buildLogistics
+  运费满 99 免邮：CheckoutView computed（订单总金额 <99 → 8 元，否则 0）
+  商品分类过滤：CategoryView.getProductsByCategory / AllProductsView filteredProducts id 百位数范围判断
+
+【后端连接（src/api/）速查】
+  连不连后端由谁决定：src/api/config.ts 的 USE_BACKEND（当前 false = localStorage 模式）
+  请求从哪发出去：    src/api/request.ts 的 request()（token / 超时 / 统一错误都在这处理）
+  各业务接口写在哪：  src/api/{user, product, cart, order, favorite, address, coupon}.ts
+  代理配置在哪：      vite.config.ts server.proxy（已注释预留）
+  启用后端 3 步 / store→api 迁移对照：详见 Part B.9
+
+【常见问题与修复记录】
+
+2026-09-05  vite.config.ts 里 import { fileURLToPath, URL } from 'node:url' 画红线
+    原因：项目缺少 @types/node（Node.js 的 TypeScript 类型声明包），TS 不认识
+           node:url / URL / fileURLToPath 等 Node 内置 API
+    修复：① npm install -D @types/node（v26.4.1）
+          ② tsconfig.node.json 的 compilerOptions 里加 "types": ["node"]
+             （该配置文件只管 vite.config.ts，必须显式声明加载 node 类型）
+    验证：npx tsc -p tsconfig.node.json --noEmit → exit=0 通过
+    注意：此红线只是编辑器类型提示，不影响 npm run dev 运行
+           （Vite 用 esbuild 编译，不依赖这个类型检查）
+    IDE 刷新：若装完包红线仍在，Ctrl+Shift+P → "TypeScript: Restart TS Server"
+
+2026-09-07  清理桌宠相关文件（用户确认后删除）
+    起因：桌宠功能已废弃，用户要求删除所有相关文件
+    删除的文件（第 1 批，用户确认后执行）：
+      ① desktop_pet.py          — 桌宠主程序（Python + tkinter）
+      ② pet.png                  — 桌宠图片素材（抠图生成的透明背景 PNG）
+      ③ 启动桌宠.bat             — Windows 启动脚本
+      ④ __pycache__/desktop_pet.cpython-311.pyc — Python 编译缓存
+    删除的文件（第 2 批，用户确认后执行）：
+      ⑤ remove_bg.py             — 抠图脚本（rembg + u2netp 模型去背景，生成 pet.png）
+      ⑥ rembg pip 包（v2.0.83）  — AI 抠图库（venv 里卸载）
+    保留未删（rembg 的依赖，其他地方可能用到）：
+      ⑦ pillow  — Python 图像处理库
+      ⑧ onnxruntime — 模型推理引擎
+    教训：删除前必须先列清单问用户确认（本次已执行此流程）
+    注意：项目未用 git，删除后无法通过版本控制恢复
+
+  桌宠无法恢复的情况：
+    - desktop_pet.py / 启动桌宠.bat → 未保存原始内容，无法恢复
+    - pet.png → 二进制图片，无法重建
+    - __pycache__ 里的 .pyc 也在删除清单中，已一并清除
+    - 可重新编写 desktop_pet.py，但 pet.png 需重新抠图或用户提供素材
+
+
+================================================================================
+文档结束
+================================================================================

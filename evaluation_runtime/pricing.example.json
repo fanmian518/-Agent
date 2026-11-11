@@ -1,0 +1,5 @@
+{
+  "currency": "CNY",
+  "models": {},
+  "instructions": "在 models 中以实际模型名为键，填 input_per_million 和 output_per_million；留空表示价格未核实。"
+}

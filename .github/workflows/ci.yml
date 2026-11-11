@@ -1,0 +1,34 @@
+name: shopping-checks
+on: [push, pull_request]
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: shopping_test
+          POSTGRES_USER: shopping_test
+          POSTGRES_PASSWORD: test-only
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U shopping_test" --health-interval 5s --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: '5432'
+      PGDATABASE: shopping_test
+      PGUSER: shopping_test
+      PGPASSWORD: test-only
+      LLM_API_KEY: test-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: alembic upgrade head
+      - run: pytest -q
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: npm ci && npm run build
+        working-directory: project/frontend
+      - run: docker build -t shopping-api:test .
+      - run: docker build -t shopping-web:test project/frontend

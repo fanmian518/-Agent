@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: ${PGDATABASE:-shopping_agent}
+      POSTGRES_USER: ${PGUSER:-shopping_agent}
+      POSTGRES_PASSWORD: ${PGPASSWORD:?Set PGPASSWORD in .env}
+    ports:
+      - "127.0.0.1:${PGPORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  migrate:
+    build: .
+    env_file: .env
+    environment: {PGHOST: postgres, PGPORT: 5432}
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres: {condition: service_healthy}
+  api:
+    build: .
+    env_file: .env
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      REDIS_URL: redis://redis:6379/0
+    volumes: [evaluation_data:/app/data]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+  web:
+    build: project/frontend
+    ports: ["127.0.0.1:8080:80"]
+    depends_on: [api]
+
+volumes:
+  redis_data:
+  evaluation_data:
+  postgres_data:
+

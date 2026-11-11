@@ -1,0 +1,2 @@
+fakeredis[lua]>=2.25,<3
+aiosqlite>=0.20,<1
